@@ -1,0 +1,841 @@
+local Players          = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UserInputService  = game:GetService("UserInputService")
+local TweenService      = game:GetService("TweenService")
+local HttpService       = game:GetService("HttpService")
+
+local Player = Players.LocalPlayer
+local PG  = Player:WaitForChild("PlayerGui")
+
+-- ── State ───────────────────────────────────────────────────────
+local _enabled  = true
+local _seen     = {}
+local _focused  = nil
+local ANTHROPIC_KEY = "sk-ant-api03-placeholder-replace-with-real-key"
+
+-- ── Fonts ───────────────────────────────────────────────────────
+local function pickFont(getter, fallback)
+    local ok, f = pcall(getter)
+    if ok and typeof(f) == "EnumItem" then return f end
+    return fallback
+end
+local F = {
+    reg   = pickFont(function() return Enum.Font.BuilderSans end,          Enum.Font.Gotham),
+    med   = pickFont(function() return Enum.Font.BuilderSansMedium end,    Enum.Font.GothamMedium),
+    bold  = pickFont(function() return Enum.Font.BuilderSansBold end,      Enum.Font.GothamBold),
+    black = pickFont(function() return Enum.Font.BuilderSansExtraBold end, Enum.Font.GothamBlack),
+}
+
+-- ── Palette ─────────────────────────────────────────────────────
+local K = {
+    bg   = Color3.fromRGB(10,10,13),  bg1  = Color3.fromRGB(15,15,19),
+    bg2  = Color3.fromRGB(21,21,26),  bg3  = Color3.fromRGB(30,30,36),
+    bg4  = Color3.fromRGB(42,42,50),
+    line = Color3.fromRGB(48,48,56),  bdr  = Color3.fromRGB(78,78,90),
+    txt  = Color3.fromRGB(238,239,244), txt2 = Color3.fromRGB(170,172,182),
+    txt3 = Color3.fromRGB(98,100,110),
+    acc      = Color3.fromRGB(212,215,224),
+    accDim   = Color3.fromRGB(158,161,172),
+    accHov   = Color3.fromRGB(238,240,246),
+    accPress = Color3.fromRGB(128,131,142),
+    ok    = Color3.fromRGB(74,200,118), err = Color3.fromRGB(220,84,84),
+    amber = Color3.fromRGB(236,186,72),
+    input = Color3.fromRGB(18,18,23),
+}
+
+-- ── UI helpers ──────────────────────────────────────────────────
+local function mk(c,p) local o=Instance.new(c); if p then o.Parent=p end; return o end
+local function corner(r,p) local c=Instance.new("UICorner",p); c.CornerRadius=UDim.new(0,r) end
+local function stroke(p,c,t,tr) local s=Instance.new("UIStroke",p); s.Color=c or K.bdr; s.Thickness=t or 1; s.Transparency=tr or 0; return s end
+local function tw(o,t,g,es,ed) return TweenService:Create(o,TweenInfo.new(t,es or Enum.EasingStyle.Quad,ed or Enum.EasingDirection.Out),g):Play() end
+local function label(t,sz,fn,c,xa,par)
+    local l=mk("TextLabel",par); l.BackgroundTransparency=1; l.Text=t or ""
+    l.TextSize=sz or 11; l.Font=fn or F.med
+    l.TextColor3=c or K.txt; l.TextXAlignment=xa or Enum.TextXAlignment.Left; return l
+end
+
+local function attachDrag(handle, target)
+    local d, ds, sp = false, nil, nil
+    handle.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+            d = true; ds = i.Position; sp = target.Position
+            i.Changed:Connect(function() if i.UserInputState == Enum.UserInputState.End then d = false end end)
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(i)
+        if not d then return end
+        if i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch then
+            local dd = i.Position - ds
+            target.Position = UDim2.new(sp.X.Scale, sp.X.Offset+dd.X, sp.Y.Scale, sp.Y.Offset+dd.Y)
+        end
+    end)
+end
+
+-- wipe previous builds
+for _, n in ipairs({"AnnouncementSniperGUI","AnnouncementSniperWM","AnnouncementSniperCustom","CodeSniperLite","PhiAutotyper"}) do
+    local old = PG:FindFirstChild(n); if old then old:Destroy() end
+end
+
+-- ══ MAIN PANEL ══════════════════════════════════════════════════
+local SG = mk("ScreenGui"); SG.Name = "PhiAutotyper"
+SG.ResetOnSpawn = false; SG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+SG.DisplayOrder = 201; SG.Parent = PG
+
+local PW, PH = 300, 274
+local HEAD_H = 42
+
+local Main = mk("Frame", SG); Main.Name = "Main"
+Main.Size = UDim2.new(0, PW, 0, PH)
+Main.Position = UDim2.new(1, -PW - 24, 0.5, -PH/2)
+Main.BackgroundColor3 = K.bg
+Main.BackgroundTransparency = 0.12
+Main.BorderSizePixel = 0; Main.ClipsDescendants = true; Main.ZIndex = 10
+corner(14, Main)
+stroke(Main, K.bdr, 1.4, 0.25)
+
+-- header
+local Head = mk("Frame", Main)
+Head.Size = UDim2.new(1, 0, 0, HEAD_H); Head.BackgroundColor3 = K.bg1
+Head.BackgroundTransparency = 0.08; Head.BorderSizePixel = 0; Head.ZIndex = 11
+corner(14, Head)
+local headMask = mk("Frame", Head); headMask.Size = UDim2.new(1,0,0,12)
+headMask.Position = UDim2.new(0,0,1,-12); headMask.BackgroundColor3 = K.bg1
+headMask.BackgroundTransparency = 0.08; headMask.BorderSizePixel = 0; headMask.ZIndex = 11
+
+local mark = mk("Frame", Head)
+mark.Size = UDim2.new(0, 10, 0, 10); mark.AnchorPoint = Vector2.new(0, 0.5)
+mark.Position = UDim2.new(0, 14, 0.5, 0); mark.BackgroundColor3 = K.txt3
+mark.BorderSizePixel = 0; mark.ZIndex = 12
+corner(5, mark)
+
+local title = label("PHI AUTOTYPER", 13, F.black, K.txt, nil, Head)
+title.Size = UDim2.new(1, -120, 1, 0); title.Position = UDim2.new(0, 32, 0, 0); title.ZIndex = 12
+
+-- feed button
+local feedBtn = mk("TextButton", Head)
+feedBtn.Size = UDim2.new(0, 22, 0, 22); feedBtn.AnchorPoint = Vector2.new(1, 0.5)
+feedBtn.Position = UDim2.new(1, -66, 0.5, 0); feedBtn.BackgroundColor3 = K.bg3
+feedBtn.Text = ""; feedBtn.BorderSizePixel = 0; feedBtn.AutoButtonColor = false; feedBtn.ZIndex = 13
+corner(7, feedBtn); local feedBtnStroke = stroke(feedBtn, K.bdr, 1, 0)
+for i = 0, 2 do
+    local dot = mk("Frame", feedBtn)
+    dot.Size = UDim2.new(0, 2.5, 0, 2.5); dot.AnchorPoint = Vector2.new(0, 0.5)
+    dot.Position = UDim2.new(0, 5, 0.5, (i-1)*4); dot.BackgroundColor3 = K.txt2
+    dot.BorderSizePixel = 0; dot.ZIndex = 14; corner(2, dot)
+    local ln = mk("Frame", feedBtn)
+    ln.Size = UDim2.new(0, 8, 0, 1.6); ln.AnchorPoint = Vector2.new(0, 0.5)
+    ln.Position = UDim2.new(0, 9, 0.5, (i-1)*4); ln.BackgroundColor3 = K.txt2
+    ln.BorderSizePixel = 0; ln.ZIndex = 14; corner(1, ln)
+end
+feedBtn.MouseEnter:Connect(function() tw(feedBtn, 0.1, {BackgroundColor3 = K.bg4}); tw(feedBtnStroke, 0.1, {Color = K.acc}) end)
+feedBtn.MouseLeave:Connect(function() tw(feedBtn, 0.1, {BackgroundColor3 = K.bg3}); tw(feedBtnStroke, 0.1, {Color = K.bdr}) end)
+
+-- gear button
+local gear = mk("TextButton", Head)
+gear.Size = UDim2.new(0, 22, 0, 22); gear.AnchorPoint = Vector2.new(1, 0.5)
+gear.Position = UDim2.new(1, -38, 0.5, 0); gear.BackgroundColor3 = K.bg3
+gear.Text = ""; gear.BorderSizePixel = 0; gear.AutoButtonColor = false; gear.ZIndex = 13
+corner(7, gear); local gearStroke = stroke(gear, K.bdr, 1, 0)
+for i = 0, 2 do
+    local ln = mk("Frame", gear)
+    ln.Size = UDim2.new(0, 11, 0, 1.6); ln.AnchorPoint = Vector2.new(0.5, 0.5)
+    ln.Position = UDim2.new(0.5, 0, 0.5, (i-1)*4); ln.BackgroundColor3 = K.txt2
+    ln.BorderSizePixel = 0; ln.ZIndex = 14; corner(1, ln)
+end
+gear.MouseEnter:Connect(function() tw(gear, 0.1, {BackgroundColor3 = K.bg4}); tw(gearStroke, 0.1, {Color = K.acc}) end)
+gear.MouseLeave:Connect(function() tw(gear, 0.1, {BackgroundColor3 = K.bg3}); tw(gearStroke, 0.1, {Color = K.bdr}) end)
+
+-- close button
+local close = mk("TextButton", Head)
+close.Size = UDim2.new(0, 22, 0, 22); close.AnchorPoint = Vector2.new(1, 0.5)
+close.Position = UDim2.new(1, -10, 0.5, 0); close.BackgroundColor3 = K.bg3
+close.TextColor3 = K.txt2; close.Font = F.bold; close.TextSize = 11
+close.Text = "X"; close.BorderSizePixel = 0; close.AutoButtonColor = false; close.ZIndex = 13
+corner(11, close); stroke(close, K.bdr, 1, 0)
+close.MouseEnter:Connect(function() tw(close, 0.1, {BackgroundColor3 = K.err, TextColor3 = K.txt}) end)
+close.MouseLeave:Connect(function() tw(close, 0.1, {BackgroundColor3 = K.bg3, TextColor3 = K.txt2}) end)
+close.MouseButton1Click:Connect(function() Main.Visible = false end)
+
+attachDrag(Head, Main)
+
+-- content area
+local content = mk("Frame", Main)
+content.Size = UDim2.new(1, -20, 1, -(HEAD_H + 12))
+content.Position = UDim2.new(0, 10, 0, HEAD_H + 6)
+content.BackgroundTransparency = 1; content.ZIndex = 11
+
+-- code box
+local boxCard = mk("Frame", content)
+boxCard.Size = UDim2.new(1, 0, 0, 50); boxCard.Position = UDim2.new(0, 0, 0, 0)
+boxCard.BackgroundColor3 = K.bg2; boxCard.BackgroundTransparency = 0.08
+boxCard.BorderSizePixel = 0; boxCard.ZIndex = 12
+corner(8, boxCard); stroke(boxCard, K.line, 1, 0.3)
+
+local boxLbl = label("CODE", 9, F.black, K.accDim, nil, boxCard)
+boxLbl.Size = UDim2.new(1, -18, 0, 10); boxLbl.Position = UDim2.new(0, 10, 0, 5); boxLbl.ZIndex = 13
+
+local CodeBox = mk("TextBox", boxCard)
+CodeBox.Size = UDim2.new(1, -18, 0, 28); CodeBox.Position = UDim2.new(0, 9, 1, -32)
+CodeBox.BackgroundColor3 = K.input; CodeBox.BorderSizePixel = 0
+CodeBox.PlaceholderText = "type code here..."
+CodeBox.PlaceholderColor3 = Color3.fromRGB(110, 112, 122)
+CodeBox.Text = ""; CodeBox.TextColor3 = K.txt
+CodeBox.Font = F.black; CodeBox.TextSize = 15
+CodeBox.ClearTextOnFocus = false; CodeBox.ZIndex = 13
+CodeBox.TextXAlignment = Enum.TextXAlignment.Left
+corner(6, CodeBox)
+local cbPad = mk("UIPadding", CodeBox)
+cbPad.PaddingLeft = UDim.new(0, 8); cbPad.PaddingRight = UDim.new(0, 8)
+local boxStroke = stroke(CodeBox, K.bdr, 1.2, 0.25)
+CodeBox.Focused:Connect(function() tw(boxStroke, 0.12, {Color = K.acc, Transparency = 0.05, Thickness = 1.4}) end)
+CodeBox.FocusLost:Connect(function() tw(boxStroke, 0.12, {Color = K.bdr, Transparency = 0.25, Thickness = 1.2}) end)
+
+-- COPY / REDEEM row
+local btnRow = mk("Frame", content)
+btnRow.Size = UDim2.new(1, 0, 0, 32); btnRow.Position = UDim2.new(0, 0, 0, 58)
+btnRow.BackgroundTransparency = 1; btnRow.ZIndex = 12
+
+local cCopy = mk("TextButton", btnRow)
+cCopy.Size = UDim2.new(0.40, -4, 1, 0); cCopy.Position = UDim2.new(0, 0, 0, 0)
+cCopy.BackgroundColor3 = K.bg2; cCopy.BorderSizePixel = 0
+cCopy.Text = "COPY"; cCopy.TextColor3 = K.txt
+cCopy.Font = F.black; cCopy.TextSize = 12
+cCopy.AutoButtonColor = false; cCopy.ZIndex = 13
+corner(6, cCopy); stroke(cCopy, K.bdr, 1.2, 0.1)
+cCopy.MouseEnter:Connect(function() tw(cCopy, 0.1, {BackgroundColor3 = K.bg4, TextColor3 = K.accHov}) end)
+cCopy.MouseLeave:Connect(function() tw(cCopy, 0.1, {BackgroundColor3 = K.bg2, TextColor3 = K.txt}) end)
+
+local cRedeem = mk("TextButton", btnRow)
+cRedeem.Size = UDim2.new(0.60, -4, 1, 0); cRedeem.Position = UDim2.new(0.40, 4, 0, 0)
+cRedeem.BackgroundColor3 = K.acc; cRedeem.BorderSizePixel = 0
+cRedeem.Text = "REDEEM"; cRedeem.TextColor3 = Color3.fromRGB(18, 18, 22)
+cRedeem.Font = F.black; cRedeem.TextSize = 13
+cRedeem.AutoButtonColor = false; cRedeem.ZIndex = 13
+corner(6, cRedeem); stroke(cRedeem, K.accHov, 1.2, 0.4)
+cRedeem.MouseEnter:Connect(function() tw(cRedeem, 0.08, {BackgroundColor3 = K.accHov}) end)
+cRedeem.MouseLeave:Connect(function() tw(cRedeem, 0.08, {BackgroundColor3 = K.acc}) end)
+
+-- LISTEN toggle row
+local monRow = mk("Frame", content)
+monRow.Size = UDim2.new(1, 0, 0, 28); monRow.Position = UDim2.new(0, 0, 0, 96)
+monRow.BackgroundColor3 = K.bg2; monRow.BackgroundTransparency = 0.08
+monRow.BorderSizePixel = 0; monRow.ZIndex = 12
+corner(7, monRow); stroke(monRow, K.line, 1, 0.3)
+
+local monLbl = label("LISTEN", 10, F.bold, K.txt2, nil, monRow)
+monLbl.Size = UDim2.new(1, -120, 1, 0); monLbl.Position = UDim2.new(0, 10, 0, 0); monLbl.ZIndex = 13
+
+local keyHint = mk("Frame", monRow)
+keyHint.Size = UDim2.new(0, 26, 0, 16); keyHint.AnchorPoint = Vector2.new(1, 0.5)
+keyHint.Position = UDim2.new(1, -52, 0.5, 0); keyHint.BackgroundColor3 = K.bg4
+keyHint.BorderSizePixel = 0; keyHint.ZIndex = 13; corner(4, keyHint); stroke(keyHint, K.bdr, 1, 0.2)
+local keyHintLbl = label("F", 9, F.black, K.txt, Enum.TextXAlignment.Center, keyHint)
+keyHintLbl.Size = UDim2.new(1,0,1,0); keyHintLbl.ZIndex = 14
+
+local pill = mk("Frame", monRow); pill.Size = UDim2.new(0, 34, 0, 16)
+pill.AnchorPoint = Vector2.new(1, 0.5); pill.Position = UDim2.new(1, -10, 0.5, 0)
+pill.BackgroundColor3 = K.txt3; pill.BorderSizePixel = 0; pill.ZIndex = 13; corner(8, pill)
+local pdot = mk("Frame", pill); pdot.Size = UDim2.new(0, 12, 0, 12)
+pdot.Position = UDim2.new(0, 2, 0.5, -6); pdot.BackgroundColor3 = K.txt
+pdot.BorderSizePixel = 0; pdot.ZIndex = 14; corner(6, pdot)
+local monBtn = mk("TextButton", monRow); monBtn.Size = UDim2.new(1, 0, 1, 0)
+monBtn.BackgroundTransparency = 1; monBtn.Text = ""; monBtn.ZIndex = 15
+
+do
+    local monOn = false
+    monBtn.MouseButton1Click:Connect(function()
+        monOn = not monOn
+        _enabled = monOn
+        tw(pill, 0.15, {BackgroundColor3 = monOn and K.acc or K.txt3})
+        tw(pdot, 0.15, {Position = UDim2.new(0, monOn and 20 or 2, 0.5, -6)}, Enum.EasingStyle.Back)
+        tw(monLbl, 0.15, {TextColor3 = monOn and K.accHov or K.txt2})
+        if monOn then
+            setCStatus(_focused and "Ready — watching" or "Click the code box first",
+                _focused and K.ok or K.txt3)
+        else
+            setCStatus("Paused", K.txt3)
+        end
+    end)
+end
+
+-- INSTA REDEEM toggle row
+local instaRow = mk("Frame", content)
+instaRow.Size = UDim2.new(1, 0, 0, 24); instaRow.Position = UDim2.new(0, 0, 0, 128)
+instaRow.BackgroundColor3 = K.bg2; instaRow.BackgroundTransparency = 0.08
+instaRow.BorderSizePixel = 0; instaRow.ZIndex = 12
+corner(7, instaRow); stroke(instaRow, K.line, 1, 0.3)
+local instaLbl = label("INSTA REDEEM", 10, F.bold, K.txt2, nil, instaRow)
+instaLbl.Size = UDim2.new(1, -56, 1, 0); instaLbl.Position = UDim2.new(0, 10, 0, 0); instaLbl.ZIndex = 13
+local ipill = mk("Frame", instaRow); ipill.Size = UDim2.new(0, 34, 0, 16)
+ipill.AnchorPoint = Vector2.new(1, 0.5); ipill.Position = UDim2.new(1, -10, 0.5, 0)
+ipill.BackgroundColor3 = K.acc; ipill.BorderSizePixel = 0; ipill.ZIndex = 13; corner(8, ipill)
+local idot = mk("Frame", ipill); idot.Size = UDim2.new(0, 12, 0, 12)
+idot.Position = UDim2.new(0, 20, 0.5, -6); idot.BackgroundColor3 = K.txt
+idot.BorderSizePixel = 0; idot.ZIndex = 14; corner(6, idot)
+local ibtn = mk("TextButton", instaRow); ibtn.Size = UDim2.new(1, 0, 1, 0)
+ibtn.BackgroundTransparency = 1; ibtn.Text = ""; ibtn.ZIndex = 15
+
+do
+    local instaOn = true
+    ibtn.MouseButton1Click:Connect(function()
+        instaOn = not instaOn
+        tw(ipill, 0.15, {BackgroundColor3 = instaOn and K.acc or K.txt3})
+        tw(idot, 0.15, {Position = UDim2.new(0, instaOn and 20 or 2, 0.5, -6)}, Enum.EasingStyle.Back)
+        tw(instaLbl, 0.15, {TextColor3 = instaOn and K.accHov or K.txt2})
+    end)
+end
+
+-- status card
+local cStatus = mk("Frame", content)
+cStatus.Size = UDim2.new(1, 0, 0, 50); cStatus.Position = UDim2.new(0, 0, 0, 158)
+cStatus.BackgroundColor3 = K.bg2; cStatus.BackgroundTransparency = 0.08
+cStatus.BorderSizePixel = 0; cStatus.ZIndex = 12
+corner(7, cStatus); stroke(cStatus, K.line, 1, 0.3)
+
+local cStatusHdr = label("STATUS", 8, F.black, K.accDim, nil, cStatus)
+cStatusHdr.Size = UDim2.new(1, -18, 0, 10); cStatusHdr.Position = UDim2.new(0, 10, 0, 5); cStatusHdr.ZIndex = 13
+
+local cStatusDot = mk("Frame", cStatus)
+cStatusDot.Size = UDim2.new(0, 7, 0, 7); cStatusDot.AnchorPoint = Vector2.new(0, 0.5)
+cStatusDot.Position = UDim2.new(0, 10, 0, 30); cStatusDot.BackgroundColor3 = K.txt3
+cStatusDot.BorderSizePixel = 0; cStatusDot.ZIndex = 13; corner(50, cStatusDot)
+
+local cStatusLbl = label("Click the code box first", 11, F.bold, K.txt, nil, cStatus)
+cStatusLbl.Size = UDim2.new(1, -30, 0, 26); cStatusLbl.Position = UDim2.new(0, 22, 0, 17)
+cStatusLbl.TextWrapped = true; cStatusLbl.TextYAlignment = Enum.TextYAlignment.Center; cStatusLbl.ZIndex = 13
+
+-- riddle card (hidden by default, shown when riddle detected)
+local riddleCard = mk("Frame", content)
+riddleCard.Size = UDim2.new(1, 0, 0, 40); riddleCard.Position = UDim2.new(0, 0, 0, 214)
+riddleCard.BackgroundColor3 = Color3.fromRGB(30,22,8); riddleCard.BackgroundTransparency = 0.08
+riddleCard.BorderSizePixel = 0; riddleCard.ZIndex = 12; riddleCard.Visible = false
+corner(7, riddleCard); stroke(riddleCard, K.amber, 1, 0.3)
+local riddleTag = label("RIDDLE SOLVER", 7, F.black, K.amber, nil, riddleCard)
+riddleTag.Size = UDim2.new(1, -16, 0, 10); riddleTag.Position = UDim2.new(0, 8, 0, 4); riddleTag.ZIndex = 13
+local riddleMsg = label("", 10, F.med, K.txt, nil, riddleCard)
+riddleMsg.Size = UDim2.new(1, -16, 0, 18); riddleMsg.Position = UDim2.new(0, 8, 0, 16)
+riddleMsg.TextWrapped = true; riddleMsg.ZIndex = 13
+
+-- ── Status + flash helpers ──────────────────────────────────────
+local function setCStatus(text, col)
+    col = col or K.txt3
+    cStatusLbl.Text = text; cStatusLbl.TextColor3 = col; cStatusDot.BackgroundColor3 = col
+end
+
+local function flashCode(code, col)
+    col = col or K.acc
+    CodeBox.Text = code; CodeBox.TextColor3 = col
+    tw(boxStroke, 0.1, {Color = col})
+    task.delay(0.6, function()
+        tw(boxStroke, 0.5, {Color = K.bdr})
+        tw(CodeBox, 0.5, {TextColor3 = col})
+    end)
+end
+
+local function showRiddle(msg, col)
+    riddleMsg.Text = msg; riddleMsg.TextColor3 = col or K.txt
+    riddleCard.Visible = true
+end
+local function hideRiddle() riddleCard.Visible = false end
+
+-- ── Focus tracking (which TextBox the user clicked) ─────────────
+UserInputService.TextBoxFocused:Connect(function(box)
+    _focused = box
+    if _enabled then setCStatus("Ready — watching", K.ok) end
+end)
+UserInputService.TextBoxFocusReleased:Connect(function(box)
+    if _focused == box then
+        _focused = nil
+        if _enabled then setCStatus("Click the code box first", K.txt3) end
+    end
+end)
+
+-- ── Append detected text into the focused box ───────────────────
+local function appendToBox(text)
+    if not text or text == "" then return end
+    if not _focused or not _focused.Parent then
+        setCStatus("Click the code box first!", K.amber)
+        flashCode(text, K.amber)
+        return
+    end
+    local cur = _focused.Text or ""
+    if cur == "" then
+        _focused.Text = text
+    else
+        _focused.Text = cur .. " " .. text
+    end
+    setCStatus("Appended!", K.ok)
+    flashCode(text, K.ok)
+end
+
+-- ── Riddle detection ────────────────────────────────────────────
+local RIDDLE_KW = {
+    "when was","how old","what year","what month","birthday","age of",
+    "released","release date","hint","riddle","figure out","guess",
+    "first letter","combine","spell","backwards","months","years",
+    "old is","how many","what is","do you know","can you","which month",
+    "which year","how long","since when",
+}
+local function isRiddle(txt)
+    local l = txt:lower()
+    for _, p in ipairs(RIDDLE_KW) do if l:find(p, 1, true) then return true end end
+    return false
+end
+
+-- ── Local riddle solver ─────────────────────────────────────────
+local SAB = {rm="MAY", ry="2024", rf="MAY2024", sa="24", c="MAY24"}
+local function solveLocal(txt)
+    local l = txt:lower()
+    if (l:find("month") or l:find("when")) and (l:find("sab") or l:find("steal") or l:find("releas")) then return SAB.rm end
+    if l:find("year") and (l:find("sab") or l:find("releas")) then return SAB.ry end
+    if (l:find("when") or l:find("date")) and (l:find("sab") or l:find("steal") or l:find("releas")) then return SAB.rf end
+    if (l:find("age") or l:find("old")) and l:find("sammy") then return SAB.sa end
+    if (l:find("age") or l:find("old")) and (l:find("month") or l:find("when") or l:find("releas")) then return SAB.c end
+    if l:find("may") and l:find("24") then return SAB.c end
+    return nil
+end
+
+-- ── AI fallback solver ──────────────────────────────────────────
+local function callAI(prompt)
+    if not ANTHROPIC_KEY or ANTHROPIC_KEY == "" then return nil end
+    local ok, result = pcall(function()
+        local body = HttpService:JSONEncode({
+            model = "claude-sonnet-4-6",
+            max_tokens = 40,
+            system = "Decode Roblox promo codes for Steal a Brainrot (SAB). SAB released May 2024. Sammy is 24. Output ONLY the code uppercase no spaces nothing else.",
+            messages = {{role="user", content=prompt}}
+        })
+        local resp = HttpService:RequestAsync({
+            Url = "https://api.anthropic.com/v1/messages",
+            Method = "POST",
+            Headers = {
+                ["Content-Type"] = "application/json",
+                ["x-api-key"] = ANTHROPIC_KEY,
+                ["anthropic-version"] = "2023-06-01",
+            },
+            Body = body,
+        })
+        if resp.StatusCode == 200 then
+            local data = HttpService:JSONDecode(resp.Body)
+            if data and data.content and data.content[1] then return data.content[1].text end
+        end
+        return nil
+    end)
+    if ok and result then return tostring(result):match("^%s*([A-Z0-9_%-]+)%s*$") end
+    return nil
+end
+
+-- ── Word extractor ──────────────────────────────────────────────
+local function extractWords(txt)
+    local words = {}
+    for w in txt:gmatch("%S+") do
+        local clean = w:gsub("[^A-Za-z0-9]", "")
+        if #clean >= 2 then
+            local isUpper = clean == clean:upper() and clean:match("[A-Z]")
+            local isLower = clean == clean:lower() and clean:match("[a-z]") and #clean >= 3
+            if isUpper or isLower then
+                table.insert(words, clean)
+            end
+        end
+    end
+    if #words > 0 then return table.concat(words, " ") end
+    return nil
+end
+
+-- ── Main processor ──────────────────────────────────────────────
+local function processGlobal(txt)
+    if not _enabled then return end
+    if not txt or type(txt) ~= "string" or #txt < 2 then return end
+    if _seen[txt] then return end
+    _seen[txt] = true
+    task.delay(20, function() _seen[txt] = nil end)
+
+    if isRiddle(txt) then
+        showRiddle("Solving...", K.amber)
+        setCStatus("Riddle detected...", K.amber)
+        local ans = solveLocal(txt)
+        if ans then
+            showRiddle("Answer: " .. ans, K.ok)
+            setCStatus("Solved: " .. ans, K.ok)
+            appendToBox(ans)
+            task.delay(4, hideRiddle)
+            return
+        end
+        showRiddle("Asking AI...", K.amber)
+        task.spawn(function()
+            local ai = callAI('Sammy said: "' .. txt .. '". SAB=May2024,Sammy=24. Code only.')
+            if ai then
+                showRiddle("AI: " .. ai, K.ok)
+                setCStatus("AI solved: " .. ai, K.ok)
+                appendToBox(ai)
+                task.delay(4, hideRiddle)
+            else
+                showRiddle("Could not solve", K.err)
+                setCStatus("Riddle unsolved", K.err)
+                task.delay(3, function()
+                    hideRiddle()
+                    setCStatus(_focused and "Ready — watching" or "Click the code box first",
+                        _focused and K.ok or K.txt3)
+                end)
+            end
+        end)
+        return
+    end
+
+    local words = extractWords(txt)
+    if words then appendToBox(words) end
+end
+
+-- ── Feed entry builder ──────────────────────────────────────────
+local feedCards, feedOrder, MAX_FEED = {}, 0, 40
+
+local function addFeedEntry(text, code)
+    if fEmpty then fEmpty:Destroy(); fEmpty = nil end
+    feedOrder += 1
+    fCountLbl.Text = feedOrder .. " caught"
+
+    local card = mk("Frame", feedScroll)
+    card.Size = UDim2.new(1, 0, 0, 0); card.AutomaticSize = Enum.AutomaticSize.Y
+    card.BackgroundColor3 = K.bg3; card.BackgroundTransparency = 0.05
+    card.BorderSizePixel = 0; card.LayoutOrder = -feedOrder; card.ZIndex = 22
+    corner(8, card); stroke(card, code and K.bdr or K.line, 1, code and 0.1 or 0.4)
+    local cpad = mk("UIPadding", card)
+    cpad.PaddingTop = UDim.new(0,8); cpad.PaddingBottom = UDim.new(0,8)
+    cpad.PaddingLeft = UDim.new(0,9); cpad.PaddingRight = UDim.new(0,9)
+    local clay = mk("UIListLayout", card)
+    clay.SortOrder = Enum.SortOrder.LayoutOrder; clay.Padding = UDim.new(0, 5)
+
+    local hrow = mk("Frame", card)
+    hrow.Size = UDim2.new(1, 0, 0, 12); hrow.BackgroundTransparency = 1; hrow.LayoutOrder = 1; hrow.ZIndex = 23
+    local sdot = mk("Frame", hrow)
+    sdot.Size = UDim2.new(0, 6, 0, 6); sdot.AnchorPoint = Vector2.new(0, 0.5)
+    sdot.Position = UDim2.new(0, 0, 0.5, 0); sdot.BackgroundColor3 = code and K.acc or K.txt3
+    sdot.BorderSizePixel = 0; sdot.ZIndex = 24; corner(50, sdot)
+    local src = label("DETECTED", 8, F.black, K.accDim, nil, hrow)
+    src.Size = UDim2.new(0, 60, 1, 0); src.Position = UDim2.new(0, 12, 0, 0); src.ZIndex = 24
+    local tm = label(os.date("%H:%M:%S"), 8, F.med, K.txt3, Enum.TextXAlignment.Right, hrow)
+    tm.Size = UDim2.new(0, 70, 1, 0); tm.Position = UDim2.new(1, -70, 0, 0); tm.ZIndex = 24
+
+    local msg = label(text, 10, F.med, K.txt, nil, card)
+    msg.Size = UDim2.new(1, 0, 0, 0); msg.AutomaticSize = Enum.AutomaticSize.Y
+    msg.TextWrapped = true; msg.LayoutOrder = 2; msg.ZIndex = 23
+
+    if code then
+        local crow = mk("Frame", card)
+        crow.Size = UDim2.new(1, 0, 0, 26); crow.BackgroundTransparency = 1; crow.LayoutOrder = 3; crow.ZIndex = 23
+        local chip = mk("Frame", crow)
+        chip.Size = UDim2.new(0.55, -4, 1, 0); chip.BackgroundColor3 = K.input
+        chip.BorderSizePixel = 0; chip.ZIndex = 24; corner(5, chip); stroke(chip, K.bdr, 1, 0.2)
+        local chl = label(code, 11, F.black, K.accHov, Enum.TextXAlignment.Center, chip)
+        chl.Size = UDim2.new(1, -8, 1, 0); chl.Position = UDim2.new(0, 4, 0, 0); chl.ZIndex = 25
+
+        local useBtn = mk("TextButton", crow)
+        useBtn.Size = UDim2.new(0.45, -4, 1, 0); useBtn.Position = UDim2.new(0.55, 4, 0, 0)
+        useBtn.BackgroundColor3 = K.acc; useBtn.BorderSizePixel = 0; useBtn.Text = "USE"
+        useBtn.TextColor3 = Color3.fromRGB(18,18,22); useBtn.Font = F.black; useBtn.TextSize = 9
+        useBtn.AutoButtonColor = false; useBtn.ZIndex = 24; corner(5, useBtn)
+        useBtn.MouseButton1Click:Connect(function()
+            appendToBox(code)
+        end)
+    end
+
+    table.insert(feedCards, card)
+    if #feedCards > MAX_FEED then
+        local oldc = table.remove(feedCards, 1)
+        if oldc then oldc:Destroy() end
+    end
+end
+
+-- ── GUI scanner: watch PlayerGui for announcements ──────────────
+local _watched = {}
+local function watchLabel(obj)
+    if _watched[obj] then return end
+    _watched[obj] = true
+    obj:GetPropertyChangedSignal("Text"):Connect(function()
+        local t = obj.Text or ""
+        processGlobal(t)
+        if extractWords(t) or isRiddle(t) then
+            addFeedEntry(t, extractWords(t))
+        end
+    end)
+end
+
+local BAD = {"backpack","inventory","chatmain","bubblechat","overhead","nametag","leaderboard","hudgui"}
+local GOOD = {"global","announce","notif","banner","broadcast","event","popup","sammy","alert","header","news","system","message","center"}
+local function classify(obj)
+    local n = (obj.Name or ""):lower()
+    local pn = ((obj.Parent and obj.Parent.Name) or ""):lower()
+    local gpn = ((obj.Parent and obj.Parent.Parent and obj.Parent.Parent.Name) or ""):lower()
+    for _, b in ipairs(BAD) do if n:find(b) or pn:find(b) then return false end end
+    for _, g in ipairs(GOOD) do
+        if n:find(g) or pn:find(g) or gpn:find(g) then return true end
+    end
+    return false
+end
+
+PG.DescendantAdded:Connect(function(obj)
+    task.wait(0.04)
+    if obj:IsA("TextLabel") then
+        local txt = obj.Text or ""
+        if classify(obj) or extractWords(txt) or isRiddle(txt) then
+            watchLabel(obj)
+            if #txt > 1 then
+                processGlobal(txt)
+                local w = extractWords(txt)
+                if w or isRiddle(txt) then addFeedEntry(txt, w) end
+            end
+        end
+        obj:GetPropertyChangedSignal("Text"):Connect(function()
+            local t = obj.Text or ""
+            if classify(obj) or extractWords(t) or isRiddle(t) then
+                if not _watched[obj] then watchLabel(obj) end
+                processGlobal(t)
+                local w = extractWords(t)
+                if w or isRiddle(t) then addFeedEntry(t, w) end
+            end
+        end)
+    end
+end)
+
+-- ── TextChatService listener ────────────────────────────────────
+pcall(function()
+    local tcs = game:GetService("TextChatService")
+    if tcs and tcs.MessageReceived then
+        tcs.MessageReceived:Connect(function(msg)
+            if not msg then return end
+            local t = msg.Text or ""
+            processGlobal(t)
+            local w = extractWords(t)
+            if w or isRiddle(t) then addFeedEntry(t, w) end
+        end)
+    end
+end)
+
+-- ── ReplicatedStorage watchers ──────────────────────────────────
+pcall(function()
+    local shared = ReplicatedStorage:WaitForChild("Shared", 5)
+    if not shared then return end
+    local flags = shared:WaitForChild("Flags", 5); if not flags then return end
+    local cf = flags:WaitForChild("CodesFlags", 5); if not cf then return end
+    cf.ChildAdded:Connect(function(obj)
+        processGlobal(obj.Name)
+        addFeedEntry(obj.Name, extractWords(obj.Name))
+        if obj:IsA("StringValue") then
+            processGlobal(tostring(obj.Value))
+            addFeedEntry(tostring(obj.Value), extractWords(tostring(obj.Value)))
+            obj:GetPropertyChangedSignal("Value"):Connect(function()
+                processGlobal(tostring(obj.Value))
+                addFeedEntry(tostring(obj.Value), extractWords(tostring(obj.Value)))
+            end)
+        end
+    end)
+end)
+
+pcall(function()
+    local ctrl = ReplicatedStorage:WaitForChild("Controllers", 5)
+    if not ctrl then return end
+    local cc = ctrl:WaitForChild("CodesController", 5); if not cc then return end
+    cc.DescendantAdded:Connect(function(obj)
+        if obj:IsA("StringValue") then
+            processGlobal(tostring(obj.Value))
+            addFeedEntry(tostring(obj.Value), extractWords(tostring(obj.Value)))
+        end
+        processGlobal(obj.Name)
+        addFeedEntry(obj.Name, extractWords(obj.Name))
+    end)
+end)
+
+-- ══ SETTINGS PANEL ══════════════════════════════════════════════
+local SW, SH = 220, 258
+local Settings = mk("Frame", SG); Settings.Name = "Settings"
+Settings.Size = UDim2.new(0, SW, 0, SH)
+Settings.Position = UDim2.new(1, -PW - 24 - SW - 12, 0.5, -SH/2)
+Settings.BackgroundColor3 = K.bg; Settings.BackgroundTransparency = 0.12
+Settings.BorderSizePixel = 0; Settings.ClipsDescendants = true; Settings.ZIndex = 20
+Settings.Visible = false; corner(14, Settings)
+stroke(Settings, K.bdr, 1.4, 0.25)
+
+local sHead = mk("Frame", Settings)
+sHead.Size = UDim2.new(1, 0, 0, 32); sHead.BackgroundColor3 = K.bg1
+sHead.BackgroundTransparency = 0.08; sHead.BorderSizePixel = 0; sHead.ZIndex = 21
+corner(14, sHead)
+local sHeadMask = mk("Frame", sHead); sHeadMask.Size = UDim2.new(1,0,0,10)
+sHeadMask.Position = UDim2.new(0,0,1,-10); sHeadMask.BackgroundColor3 = K.bg1
+sHeadMask.BackgroundTransparency = 0.08; sHeadMask.BorderSizePixel = 0; sHeadMask.ZIndex = 21
+local sTitle = label("SETTINGS", 11, F.black, K.txt, nil, sHead)
+sTitle.Size = UDim2.new(1, -44, 1, 0); sTitle.Position = UDim2.new(0, 12, 0, 0); sTitle.ZIndex = 22
+local sClose = mk("TextButton", sHead)
+sClose.Size = UDim2.new(0, 20, 0, 20); sClose.AnchorPoint = Vector2.new(1, 0.5)
+sClose.Position = UDim2.new(1, -8, 0.5, 0); sClose.BackgroundColor3 = K.bg3
+sClose.TextColor3 = K.txt2; sClose.Font = F.bold; sClose.TextSize = 10
+sClose.Text = "X"; sClose.BorderSizePixel = 0; sClose.AutoButtonColor = false; sClose.ZIndex = 23
+corner(10, sClose); stroke(sClose, K.bdr, 1, 0)
+sClose.MouseEnter:Connect(function() tw(sClose, 0.1, {BackgroundColor3 = K.err, TextColor3 = K.txt}) end)
+sClose.MouseLeave:Connect(function() tw(sClose, 0.1, {BackgroundColor3 = K.bg3, TextColor3 = K.txt2}) end)
+sClose.MouseButton1Click:Connect(function() Settings.Visible = false end)
+attachDrag(sHead, Settings)
+
+local sBody = mk("Frame", Settings)
+sBody.Size = UDim2.new(1, -20, 1, -42); sBody.Position = UDim2.new(0, 10, 0, 38)
+sBody.BackgroundTransparency = 1; sBody.ZIndex = 21
+
+local function rowFrame(y, h)
+    local r = mk("Frame", sBody)
+    r.Size = UDim2.new(1, 0, 0, h); r.Position = UDim2.new(0, 0, 0, y)
+    r.BackgroundColor3 = K.bg2; r.BackgroundTransparency = 0.08
+    r.BorderSizePixel = 0; r.ZIndex = 22; corner(7, r); stroke(r, K.line, 1, 0.3)
+    return r
+end
+
+-- keybind row
+local kRow = rowFrame(0, 30)
+local kLbl = label("KEYBIND", 10, F.bold, K.txt2, nil, kRow)
+kLbl.Size = UDim2.new(1, -80, 1, 0); kLbl.Position = UDim2.new(0, 10, 0, 0); kLbl.ZIndex = 23
+local keyBtn = mk("TextButton", kRow)
+keyBtn.Size = UDim2.new(0, 62, 0, 20); keyBtn.AnchorPoint = Vector2.new(1, 0.5)
+keyBtn.Position = UDim2.new(1, -8, 0.5, 0); keyBtn.BackgroundColor3 = K.bg4
+keyBtn.Text = "F"; keyBtn.TextColor3 = K.txt
+keyBtn.Font = F.bold; keyBtn.TextSize = 10; keyBtn.AutoButtonColor = false; keyBtn.ZIndex = 23
+corner(5, keyBtn); local keyBtnStroke = stroke(keyBtn, K.bdr, 1, 0.1)
+keyBtn.MouseEnter:Connect(function() tw(keyBtnStroke, 0.1, {Color = K.acc, Transparency = 0}) end)
+keyBtn.MouseLeave:Connect(function() tw(keyBtnStroke, 0.1, {Color = K.bdr, Transparency = 0.1}) end)
+
+-- toggle row helper (visual only)
+local function makeToggleRow(y, text, default)
+    local r = rowFrame(y, 30)
+    local lb = label(text, 10, F.bold, K.txt2, nil, r)
+    lb.Size = UDim2.new(1, -56, 1, 0); lb.Position = UDim2.new(0, 10, 0, 0); lb.ZIndex = 23
+    local p = mk("Frame", r); p.Size = UDim2.new(0, 34, 0, 16)
+    p.AnchorPoint = Vector2.new(1, 0.5); p.Position = UDim2.new(1, -10, 0.5, 0)
+    p.BackgroundColor3 = default and K.acc or K.txt3; p.BorderSizePixel = 0; p.ZIndex = 23; corner(8, p)
+    local d = mk("Frame", p); d.Size = UDim2.new(0, 12, 0, 12)
+    d.Position = UDim2.new(0, default and 20 or 2, 0.5, -6); d.BackgroundColor3 = K.txt
+    d.BorderSizePixel = 0; d.ZIndex = 24; corner(6, d)
+    local b = mk("TextButton", r); b.Size = UDim2.new(1, 0, 1, 0)
+    b.BackgroundTransparency = 1; b.Text = ""; b.ZIndex = 25
+    local state = default
+    b.MouseButton1Click:Connect(function()
+        state = not state
+        tw(p, 0.15, {BackgroundColor3 = state and K.acc or K.txt3})
+        tw(d, 0.15, {Position = UDim2.new(0, state and 20 or 2, 0.5, -6)}, Enum.EasingStyle.Back)
+    end)
+end
+makeToggleRow(34, "AUTO TYPE", true)
+makeToggleRow(68, "MANUAL", false)
+makeToggleRow(102, "SYMBOLS", false)
+
+-- segmented row helper (visual only)
+local function makeSegRow(y, labelText, opts, default)
+    local row = rowFrame(y, 30)
+    local lb = label(labelText, 10, F.bold, K.txt2, nil, row)
+    lb.Size = UDim2.new(0, 60, 1, 0); lb.Position = UDim2.new(0, 10, 0, 0); lb.ZIndex = 23
+    local host = mk("Frame", row)
+    host.AnchorPoint = Vector2.new(1, 0.5); host.Position = UDim2.new(1, -8, 0.5, 0)
+    host.Size = UDim2.new(0, 132, 0, 20); host.BackgroundTransparency = 1; host.ZIndex = 23
+    local btns, n = {}, #opts
+    local function sel(opt)
+        for o, b in pairs(btns) do
+            local on = (o == opt)
+            tw(b, 0.12, {BackgroundColor3 = on and K.acc or K.bg3})
+            b.TextColor3 = on and Color3.fromRGB(18,18,22) or K.txt2
+        end
+    end
+    for i, opt in ipairs(opts) do
+        local b = mk("TextButton", host)
+        b.Size = UDim2.new(1/n, -3, 1, 0); b.Position = UDim2.new((i-1)/n, (i-1)*1.5, 0, 0)
+        b.BackgroundColor3 = K.bg3; b.BorderSizePixel = 0
+        b.Text = tostring(opt); b.Font = F.bold; b.TextSize = 9
+        b.TextColor3 = K.txt2; b.AutoButtonColor = false; b.ZIndex = 24
+        corner(5, b); btns[opt] = b
+        b.MouseButton1Click:Connect(function() sel(opt) end)
+    end
+    sel(default)
+end
+makeSegRow(136, "CASE", {"UPPER", "lower", "EXACT"}, "EXACT")
+makeSegRow(170, "WORDS", {"1", "2", "3", "4"}, "1")
+
+-- gear opens settings
+gear.MouseButton1Click:Connect(function()
+    if Settings.Visible then Settings.Visible = false; return end
+    local mp = Main.Position
+    Settings.Position = UDim2.new(mp.X.Scale, mp.X.Offset - SW - 12, mp.Y.Scale, mp.Y.Offset + (PH - SH)/2)
+    Settings.Visible = true
+end)
+
+-- ══ LIVE FEED PANEL ═════════════════════════════════════════════
+local FW, FH = 306, 300
+local FeedWin = mk("Frame", SG); FeedWin.Name = "Feed"
+FeedWin.Size = UDim2.new(0, FW, 0, FH)
+FeedWin.Position = UDim2.new(1, -PW - 24 - FW - 12, 0.5, -FH/2)
+FeedWin.BackgroundColor3 = K.bg; FeedWin.BackgroundTransparency = 0.12
+FeedWin.BorderSizePixel = 0; FeedWin.ClipsDescendants = true; FeedWin.ZIndex = 20
+FeedWin.Visible = false; corner(14, FeedWin)
+stroke(FeedWin, K.bdr, 1.4, 0.25)
+
+local fHead = mk("Frame", FeedWin)
+fHead.Size = UDim2.new(1, 0, 0, 32); fHead.BackgroundColor3 = K.bg1
+fHead.BackgroundTransparency = 0.08; fHead.BorderSizePixel = 0; fHead.ZIndex = 21
+corner(14, fHead)
+local fHeadMask = mk("Frame", fHead); fHeadMask.Size = UDim2.new(1,0,0,10)
+fHeadMask.Position = UDim2.new(0,0,1,-10); fHeadMask.BackgroundColor3 = K.bg1
+fHeadMask.BackgroundTransparency = 0.08; fHeadMask.BorderSizePixel = 0; fHeadMask.ZIndex = 21
+local fLiveDot = mk("Frame", fHead)
+fLiveDot.Size = UDim2.new(0, 7, 0, 7); fLiveDot.AnchorPoint = Vector2.new(0, 0.5)
+fLiveDot.Position = UDim2.new(0, 12, 0.5, 0); fLiveDot.BackgroundColor3 = K.txt3
+fLiveDot.BorderSizePixel = 0; fLiveDot.ZIndex = 22; corner(50, fLiveDot)
+local fTitle = label("LIVE FEED", 11, F.black, K.txt, nil, fHead)
+fTitle.Size = UDim2.new(0, 100, 1, 0); fTitle.Position = UDim2.new(0, 26, 0, 0); fTitle.ZIndex = 22
+local fCountLbl = label("0 caught", 9, F.bold, K.txt3, Enum.TextXAlignment.Right, fHead)
+fCountLbl.Size = UDim2.new(0, 60, 1, 0); fCountLbl.Position = UDim2.new(1, -146, 0, 0); fCountLbl.ZIndex = 22
+local fClear = mk("TextButton", fHead)
+fClear.Size = UDim2.new(0, 44, 0, 18); fClear.AnchorPoint = Vector2.new(1, 0.5)
+fClear.Position = UDim2.new(1, -34, 0.5, 0); fClear.BackgroundColor3 = K.bg3
+fClear.Text = "CLEAR"; fClear.TextColor3 = K.txt2; fClear.Font = F.bold; fClear.TextSize = 8
+fClear.BorderSizePixel = 0; fClear.AutoButtonColor = false; fClear.ZIndex = 23
+corner(5, fClear); stroke(fClear, K.bdr, 1, 0.2)
+fClear.MouseEnter:Connect(function() tw(fClear, 0.1, {BackgroundColor3 = K.bg4, TextColor3 = K.accHov}) end)
+fClear.MouseLeave:Connect(function() tw(fClear, 0.1, {BackgroundColor3 = K.bg3, TextColor3 = K.txt2}) end)
+local fClose = mk("TextButton", fHead)
+fClose.Size = UDim2.new(0, 20, 0, 20); fClose.AnchorPoint = Vector2.new(1, 0.5)
+fClose.Position = UDim2.new(1, -8, 0.5, 0); fClose.BackgroundColor3 = K.bg3
+fClose.TextColor3 = K.txt2; fClose.Font = F.bold; fClose.TextSize = 10
+fClose.Text = "X"; fClose.BorderSizePixel = 0; fClose.AutoButtonColor = false; fClose.ZIndex = 23
+corner(10, fClose); stroke(fClose, K.bdr, 1, 0)
+fClose.MouseEnter:Connect(function() tw(fClose, 0.1, {BackgroundColor3 = K.err, TextColor3 = K.txt}) end)
+fClose.MouseLeave:Connect(function() tw(fClose, 0.1, {BackgroundColor3 = K.bg3, TextColor3 = K.txt2}) end)
+fClose.MouseButton1Click:Connect(function() FeedWin.Visible = false end)
+attachDrag(fHead, FeedWin)
+
+local feedScroll = mk("ScrollingFrame", FeedWin)
+feedScroll.Size = UDim2.new(1, -16, 1, -40); feedScroll.Position = UDim2.new(0, 8, 0, 36)
+feedScroll.BackgroundTransparency = 1; feedScroll.BorderSizePixel = 0
+feedScroll.ScrollBarThickness = 3; feedScroll.ScrollBarImageColor3 = K.accDim
+feedScroll.ScrollBarImageTransparency = 0.3; feedScroll.ZIndex = 21
+feedScroll.CanvasSize = UDim2.new(0,0,0,0); feedScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+feedScroll.ScrollingDirection = Enum.ScrollingDirection.Y
+local feedLay = mk("UIListLayout", feedScroll)
+feedLay.SortOrder = Enum.SortOrder.LayoutOrder; feedLay.Padding = UDim.new(0, 6)
+
+local fEmpty = label("waiting for announcements...", 10, F.med, K.txt3, Enum.TextXAlignment.Center, feedScroll)
+fEmpty.Size = UDim2.new(1, 0, 0, 40); fEmpty.LayoutOrder = 999; fEmpty.ZIndex = 22
+
+-- clear feed
+fClear.MouseButton1Click:Connect(function()
+    for _, c in ipairs(feedCards) do c:Destroy() end
+    feedCards = {}; feedOrder = 0; fCountLbl.Text = "0 caught"
+    if not fEmpty then
+        fEmpty = label("waiting for announcements...", 10, F.med, K.txt3, Enum.TextXAlignment.Center, feedScroll)
+        fEmpty.Size = UDim2.new(1, 0, 0, 40); fEmpty.LayoutOrder = 999; fEmpty.ZIndex = 22
+    end
+end)
+
+-- feed button opens feed
+feedBtn.MouseButton1Click:Connect(function()
+    if FeedWin.Visible then FeedWin.Visible = false; return end
+    local mp = Main.Position
+    FeedWin.Position = UDim2.new(mp.X.Scale, mp.X.Offset - FW - 12, mp.Y.Scale, mp.Y.Offset + (PH - FH)/2)
+    FeedWin.Visible = true
+end)
+
+-- ── Init status ─────────────────────────────────────────────────
+setCStatus("Click the code box first", K.txt3)
